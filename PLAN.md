@@ -14,12 +14,12 @@ Prompt to AI: "Create utcm_client.py. Implement the POST request to createSnapsh
 Validation: Run it. It should take 30–60 seconds to poll and output a temporary download URL. Manually open the URL in your browser to inspect the raw JSON structure of the snapshot so you understand exactly how Microsoft formats the payload.
 
 Step 3: Downloading and Unpacking (File System Operations)
-Prompt to AI: "Implement parser.py. Add code to download the JSON from the resourceLocation URL. Then, parse the JSON and write it to the directory structure defined in AGENTS.md. Ensure JSON keys are sorted for consistent diffing."
+Prompt to AI: "Implement parser.py. Add code to download the JSON from the resourceLocation URL. Then, parse the JSON and write it in YAML format to the directory structure defined in AGENTS.md. Ensure the yaml keys are sorted for consistent diffing."
 
-Validation: Run the script. Check your local directory to ensure folders like entra/conditionalaccesspolicy/ are created and contain beautifully formatted .json files.
+Validation: Run the script. Check your local directory to ensure folders like entra/conditionalaccesspolicy/ are created and contain beautifully formatted .yaml files.
 
 Step 4: Automating Git Historization
-Prompt to AI: "Update the main orchestrator script. After unpacking the JSON files, use the subprocess module or GitPython to run git add ., check if there are any diffs, and if so, run git commit -m "Automated UTCM backup: <timestamp>"."
+Prompt to AI: "Update the main orchestrator script. After unpacking the YAML files, use the subprocess module or GitPython to run git add ., check if there are any diffs, and if so, run git commit -m "Automated UTCM backup: <timestamp>"."
 
 Validation: Modify a conditional access policy in your M365 tenant. Run the script. Check your git log and git diff to ensure the script caught the change and created a new commit showing exactly what was modified.
 
