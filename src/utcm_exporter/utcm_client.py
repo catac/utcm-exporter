@@ -28,6 +28,12 @@ class UTCMClientError(RuntimeError):
     """Raised when UTCM snapshot operations fail."""
 
 
+_UNSUPPORTED_RESOURCE_PATTERN = re.compile(
+    r"ResourceType '([^']+)' is not supported\.",
+    re.IGNORECASE,
+)
+
+
 def _build_headers(access_token: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {access_token}",
@@ -111,6 +117,33 @@ def _extract_graph_error_text(response: requests.Response) -> str:
                 return f"{code}: {message} | details: {'; '.join(detail_messages)}"
         return f"{code}: {message}"
     return str(payload)
+
+
+def _extract_unsupported_resource_types(response: requests.Response) -> set[str]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return set()
+
+    error_obj = payload.get("error")
+    if not isinstance(error_obj, dict):
+        return set()
+
+    unsupported: set[str] = set()
+    details = error_obj.get("details")
+    if isinstance(details, list):
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            message = str(detail.get("message", ""))
+            for match in _UNSUPPORTED_RESOURCE_PATTERN.finditer(message):
+                unsupported.add(match.group(1).strip().lower())
+
+    message = str(error_obj.get("message", ""))
+    for match in _UNSUPPORTED_RESOURCE_PATTERN.finditer(message):
+        unsupported.add(match.group(1).strip().lower())
+
+    return unsupported
 
 
 def _find_latest_active_job(headers: dict[str, str]) -> str | None:
@@ -293,19 +326,58 @@ def create_snapshot_and_wait(
     headers = _build_headers(access_token)
 
     snapshot_resources = resources or _TEST_RESOURCES
+    requested_resources = [item.strip() for item in snapshot_resources if item.strip()]
+    if not requested_resources:
+        raise UTCMClientError("At least one resource type is required to create a snapshot")
+
     initial_display_name = _build_unique_display_name(display_name)
-    payload = {
+    payload_base = {
         "displayName": initial_display_name,
         "description": description,
-        "resources": snapshot_resources,
     }
 
-    LOGGER.info(
-        "Creating UTCM snapshot job for %d resources using displayName='%s'",
-        len(snapshot_resources),
-        initial_display_name,
-    )
-    create_response = _create_snapshot_request(headers=headers, payload=payload)
+    active_resources = requested_resources
+    while True:
+        payload = {**payload_base, "resources": active_resources}
+        LOGGER.info(
+            "Creating UTCM snapshot job for %d resources using displayName='%s'",
+            len(active_resources),
+            payload_base["displayName"],
+        )
+        create_response = _create_snapshot_request(headers=headers, payload=payload)
+
+        unsupported_resources = set()
+        if create_response.status_code == 400:
+            unsupported_resources = _extract_unsupported_resource_types(create_response)
+
+        if unsupported_resources:
+            filtered_resources = [
+                resource
+                for resource in active_resources
+                if resource.lower() not in unsupported_resources
+            ]
+            if len(filtered_resources) == len(active_resources):
+                break
+
+            LOGGER.warning(
+                "Removing %d unsupported resource types and retrying createSnapshot: %s",
+                len(unsupported_resources),
+                ", ".join(sorted(unsupported_resources)),
+            )
+            if not filtered_resources:
+                raise UTCMClientError(
+                    "All requested resource types were reported as unsupported by createSnapshot."
+                )
+
+            active_resources = filtered_resources
+            payload_base = {
+                **payload_base,
+                "displayName": _build_unique_display_name(display_name),
+            }
+            continue
+
+        break
+
     if create_response.status_code == 409:
         graph_error = _extract_graph_error_text(create_response)
         LOGGER.warning("createSnapshot returned 409 conflict: %s", graph_error)
@@ -314,7 +386,11 @@ def create_snapshot_and_wait(
             LOGGER.info("Continuing with existing active snapshot job: %s", job_id)
         else:
             retry_display_name = _build_unique_display_name(display_name)
-            retry_payload = {**payload, "displayName": retry_display_name}
+            retry_payload = {
+                **payload_base,
+                "displayName": retry_display_name,
+                "resources": active_resources,
+            }
             LOGGER.info(
                 "Retrying createSnapshot with unique displayName: %s",
                 retry_display_name,
