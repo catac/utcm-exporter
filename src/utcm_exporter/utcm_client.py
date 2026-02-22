@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -77,6 +78,77 @@ def _poll_snapshot_job(
         time.sleep(poll_interval_seconds)
 
 
+def _extract_graph_error_text(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip() or "<no response body>"
+
+    error_obj = payload.get("error")
+    if isinstance(error_obj, dict):
+        code = error_obj.get("code", "unknown")
+        message = error_obj.get("message", "No message returned")
+        details = error_obj.get("details")
+        if isinstance(details, list) and details:
+            detail_messages: list[str] = []
+            for detail in details:
+                if not isinstance(detail, dict):
+                    continue
+                detail_code = detail.get("code", "unknown")
+                detail_message = detail.get("message", "")
+                target = detail.get("target")
+                if target:
+                    detail_messages.append(
+                        f"{detail_code} ({target}): {detail_message}"
+                    )
+                else:
+                    detail_messages.append(f"{detail_code}: {detail_message}")
+            if detail_messages:
+                return f"{code}: {message} | details: {'; '.join(detail_messages)}"
+        return f"{code}: {message}"
+    return str(payload)
+
+
+def _find_latest_active_job(headers: dict[str, str]) -> str | None:
+    jobs_url = f"{_GRAPH_BETA_BASE}/admin/configurationManagement/configurationSnapshotJobs?$top=50"
+    response = requests.get(jobs_url, headers=headers, timeout=30)
+    response.raise_for_status()
+
+    payload = response.json()
+    jobs = payload.get("value", [])
+    if not isinstance(jobs, list):
+        return None
+
+    active_statuses = {"notstarted", "running"}
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        status = str(job.get("status", "")).lower()
+        if status in active_statuses:
+            active_job_id = _extract_job_id(job)
+            LOGGER.info(
+                "Reusing active snapshot job %s with status=%s after 409 conflict",
+                active_job_id,
+                status,
+            )
+            return active_job_id
+
+    return None
+
+
+def _create_snapshot_request(
+    *,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+) -> requests.Response:
+    return requests.post(
+        _CREATE_SNAPSHOT_URL,
+        headers=headers,
+        json=payload,
+        timeout=30,
+    )
+
+
 def create_snapshot_and_wait(
     *,
     display_name: str = "GitBackup",
@@ -101,17 +173,44 @@ def create_snapshot_and_wait(
     }
 
     LOGGER.info("Creating UTCM snapshot job for %d resources", len(snapshot_resources))
-    create_response = requests.post(
-        _CREATE_SNAPSHOT_URL,
-        headers=headers,
-        json=payload,
-        timeout=30,
-    )
-    create_response.raise_for_status()
-
-    create_payload = create_response.json()
-    job_id = _extract_job_id(create_payload)
-    LOGGER.info("Created snapshot job: %s", job_id)
+    create_response = _create_snapshot_request(headers=headers, payload=payload)
+    if create_response.status_code == 409:
+        graph_error = _extract_graph_error_text(create_response)
+        LOGGER.warning("createSnapshot returned 409 conflict: %s", graph_error)
+        job_id = _find_latest_active_job(headers)
+        if job_id:
+            LOGGER.info("Continuing with existing active snapshot job: %s", job_id)
+        else:
+            retry_display_name = (
+                f"{display_name} {datetime.now(UTC).strftime('%Y%m%d %H%M%S')}"
+            )
+            retry_payload = {**payload, "displayName": retry_display_name}
+            LOGGER.info(
+                "Retrying createSnapshot with unique displayName: %s",
+                retry_display_name,
+            )
+            retry_response = _create_snapshot_request(
+                headers=headers,
+                payload=retry_payload,
+            )
+            if not retry_response.ok:
+                retry_error = _extract_graph_error_text(retry_response)
+                raise UTCMClientError(
+                    "createSnapshot returned 409 and retry with unique displayName failed. "
+                    f"Initial error: {graph_error}. Retry error (HTTP {retry_response.status_code}): {retry_error}"
+                )
+            create_payload = retry_response.json()
+            job_id = _extract_job_id(create_payload)
+            LOGGER.info("Created snapshot job on retry: %s", job_id)
+    else:
+        if not create_response.ok:
+            graph_error = _extract_graph_error_text(create_response)
+            raise UTCMClientError(
+                f"createSnapshot failed with HTTP {create_response.status_code}: {graph_error}"
+            )
+        create_payload = create_response.json()
+        job_id = _extract_job_id(create_payload)
+        LOGGER.info("Created snapshot job: %s", job_id)
 
     completed_job = _poll_snapshot_job(
         headers=headers,
