@@ -100,6 +100,7 @@ def _resolve_instance_name(
     *,
     instance: dict[str, Any],
     suggested_name: str | None,
+    resource_name: str | None,
     default_name: str,
 ) -> str:
     for key in _NAME_KEYS:
@@ -108,7 +109,21 @@ def _resolve_instance_name(
             return str(value)
     if suggested_name and suggested_name.strip():
         return suggested_name
+    if resource_name and resource_name.strip():
+        return resource_name
     return default_name
+
+
+def _normalize_resource_display_name(resource_display_name: str | None) -> str | None:
+    if not resource_display_name:
+        return None
+    # Example: TeamsMeetingPolicy-Global -> Global
+    if "-" in resource_display_name:
+        _, tail = resource_display_name.split("-", 1)
+        trimmed = tail.strip()
+        if trimmed:
+            return trimmed
+    return resource_display_name.strip() or None
 
 
 def parse_snapshot_to_yaml(
@@ -134,6 +149,9 @@ def parse_snapshot_to_yaml(
             continue
 
         resource_type = str(resource.get("resourceType", "unknown.unknown"))
+        resource_level_name = _normalize_resource_display_name(
+            str(resource.get("displayName", "")).strip() or None
+        )
         workload, resource_folder = _derive_folder_names(resource_type)
         target_dir = output_base / workload / resource_folder
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +166,7 @@ def parse_snapshot_to_yaml(
             raw_name = _resolve_instance_name(
                 instance=instance,
                 suggested_name=suggested_name,
+                resource_name=resource_level_name,
                 default_name=default_name,
             )
             file_name = f"{sanitize_filename(raw_name)}.yaml"
@@ -195,8 +214,12 @@ def _prune_stale_yaml_files(*, output_base: Path, written_files: list[Path]) -> 
         removed_count += 1
         LOGGER.info("Removed stale file: %s", existing)
 
-    for directory in sorted(output_base.rglob("*"), reverse=True):
-        if directory.is_dir() and not any(directory.iterdir()):
+    # Remove empty directories from deepest to shallowest so parents can be removed
+    # after their children are pruned.
+    directories = [path for path in output_base.rglob("*") if path.is_dir()]
+    directories.sort(key=lambda path: len(path.parts), reverse=True)
+    for directory in directories:
+        if not any(directory.iterdir()):
             directory.rmdir()
 
     if removed_count:

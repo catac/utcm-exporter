@@ -1,7 +1,10 @@
 import argparse
+import json
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
 
-from utcm_exporter.parser import download_and_parse_snapshot
+from utcm_exporter.parser import download_snapshot_json, parse_snapshot_to_yaml
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +25,27 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="Delete stale YAML files not present in the current snapshot output.",
+        default=True,
+        help="Delete stale YAML files not present in the current snapshot output (default: on).",
+    )
+    parser.add_argument(
+        "--no-clean",
+        action="store_false",
+        dest="clean",
+        help="Disable pruning of stale YAML files.",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Dump raw snapshot JSON to a debug file before parsing.",
+    )
+    parser.add_argument(
+        "--debug-file",
+        default="",
+        help=(
+            "Optional path for raw snapshot JSON dump. "
+            "Default when --debug is set: output_dir/_debug/snapshot_<timestamp>.json"
+        ),
     )
     return parser
 
@@ -34,8 +57,21 @@ def main() -> None:
     )
 
     args = _build_parser().parse_args()
-    written_files = download_and_parse_snapshot(
-        resource_location=args.resource_location,
+    payload = download_snapshot_json(args.resource_location)
+
+    if args.debug:
+        if args.debug_file:
+            debug_path = Path(args.debug_file)
+        else:
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            debug_path = Path(args.output_dir) / "_debug" / f"snapshot_{ts}.json"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        with debug_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        LOGGER.info("Wrote debug snapshot JSON: %s", debug_path)
+
+    written_files = parse_snapshot_to_yaml(
+        snapshot_payload=payload,
         output_root=args.output_dir,
         clean=args.clean,
     )

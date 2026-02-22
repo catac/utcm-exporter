@@ -10,9 +10,6 @@ You will use the Microsoft Graph beta UTCM Snapshot APIs. These run asynchronous
    - Poll every 10-15 seconds. The `status` field will progress through `notStarted`, `running`, `succeeded`.
 3. **Download Result**: Once `status` is `succeeded`, extract the `resourceLocation` property (a URL) and HTTP GET it to download the JSON snapshot.
 
-# Resources JSON Schema
-Check the available resources to export and the existing fields in the json schema defined here: https://www.schemastore.org/utcm-monitor.json
-
 # Required Directory Structure
 When the snapshot JSON is downloaded, parse it and split the resources into the local file system using this structure:
 `./tenant_state/{Workload}/{ResourceType}/{ResourceDisplayName_or_ID}.json`

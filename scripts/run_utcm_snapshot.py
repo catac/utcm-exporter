@@ -18,6 +18,8 @@ def main() -> None:
             "microsoft.entra.conditionalaccesspolicy",
             "microsoft.entra.grouplifecyclepolicy",
             "microsoft.entra.serviceprincipal",
+            "microsoft.securityandcompliance.dlpcompliancepolicy",
+            "microsoft.teams.meetingpolicy",
         ],
         poll_interval_seconds=10,
         timeout_seconds=900,
