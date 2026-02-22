@@ -2,6 +2,11 @@
 
 UTCM Exporter is a Python toolset that snapshots Microsoft 365 tenant configuration through Microsoft Graph UTCM beta APIs and writes deterministic YAML files for Git-based historization and diff tracking.
 
+For more details:
+- https://cloudtips.nl/unified-tenant-configuration-management-utcm-apis-in-microsoft-graph-%EF%B8%8F-82209852b9ba
+- https://microsoft365dsc.com/blog/2026/utcm-transition/utcm-transition/index.html
+- https://learn.microsoft.com/en-us/graph/unified-tenant-configuration-management-concept-overview
+
 ## Scope
 
 The project currently covers:
@@ -13,7 +18,7 @@ The project currently covers:
 - Snapshot job cleanup utilities.
 
 Planned later:
-- Step 4 Git automation (auto `git add`/diff/commit) is intentionally deferred.
+- Step 4 Git automation (auto `git add`/diff/commit) is TODO.
 
 ## Output Structure
 
