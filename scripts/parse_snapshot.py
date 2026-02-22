@@ -19,6 +19,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="tenant_state",
         help="Output folder for parsed tenant state (default: tenant_state)",
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete stale YAML files not present in the current snapshot output.",
+    )
     return parser
 
 
@@ -32,6 +37,7 @@ def main() -> None:
     written_files = download_and_parse_snapshot(
         resource_location=args.resource_location,
         output_root=args.output_dir,
+        clean=args.clean,
     )
     LOGGER.info("Parser finished. Files written: %d", len(written_files))
 

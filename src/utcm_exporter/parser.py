@@ -111,25 +111,10 @@ def _resolve_instance_name(
     return default_name
 
 
-def _dedupe_path(path: Path) -> Path:
-    if not path.exists():
-        return path
-
-    stem = path.stem
-    suffix = path.suffix
-    parent = path.parent
-    index = 2
-
-    while True:
-        candidate = parent / f"{stem}_{index}{suffix}"
-        if not candidate.exists():
-            return candidate
-        index += 1
-
-
 def parse_snapshot_to_yaml(
     snapshot_payload: dict[str, Any],
     output_root: Path | str = Path("tenant_state"),
+    clean: bool = False,
 ) -> list[Path]:
     output_base = Path(output_root)
     resources = snapshot_payload.get("resources", [])
@@ -139,6 +124,8 @@ def parse_snapshot_to_yaml(
     written_files: list[Path] = []
     if not resources:
         LOGGER.warning("Snapshot payload contains no resources")
+        if clean:
+            _prune_stale_yaml_files(output_base=output_base, written_files=written_files)
         return written_files
 
     for resource in resources:
@@ -164,7 +151,7 @@ def parse_snapshot_to_yaml(
                 default_name=default_name,
             )
             file_name = f"{sanitize_filename(raw_name)}.yaml"
-            file_path = _dedupe_path(target_dir / file_name)
+            file_path = target_dir / file_name
 
             with file_path.open("w", encoding="utf-8") as handle:
                 yaml.safe_dump(
@@ -178,6 +165,9 @@ def parse_snapshot_to_yaml(
 
             written_files.append(file_path)
 
+    if clean:
+        _prune_stale_yaml_files(output_base=output_base, written_files=written_files)
+
     LOGGER.info("Wrote %d YAML resource files under %s", len(written_files), output_base)
     return written_files
 
@@ -185,6 +175,29 @@ def parse_snapshot_to_yaml(
 def download_and_parse_snapshot(
     resource_location: str,
     output_root: Path | str = Path("tenant_state"),
+    clean: bool = False,
 ) -> list[Path]:
     payload = download_snapshot_json(resource_location)
-    return parse_snapshot_to_yaml(payload, output_root=output_root)
+    return parse_snapshot_to_yaml(payload, output_root=output_root, clean=clean)
+
+
+def _prune_stale_yaml_files(*, output_base: Path, written_files: list[Path]) -> None:
+    if not output_base.exists():
+        return
+
+    written_resolved = {path.resolve() for path in written_files}
+    removed_count = 0
+
+    for existing in output_base.rglob("*.yaml"):
+        if existing.resolve() in written_resolved:
+            continue
+        existing.unlink()
+        removed_count += 1
+        LOGGER.info("Removed stale file: %s", existing)
+
+    for directory in sorted(output_base.rglob("*"), reverse=True):
+        if directory.is_dir() and not any(directory.iterdir()):
+            directory.rmdir()
+
+    if removed_count:
+        LOGGER.info("Removed %d stale YAML files under %s", removed_count, output_base)

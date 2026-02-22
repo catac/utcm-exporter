@@ -28,3 +28,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Default exported filles
+tenant_state/

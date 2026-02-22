@@ -13,8 +13,11 @@ def main() -> None:
 
     job_id, resource_location = create_snapshot_and_wait(
         resources=[
+            "microsoft.entra.application",
+            "microsoft.entra.namedlocationpolicy",
             "microsoft.entra.conditionalaccesspolicy",
             "microsoft.entra.grouplifecyclepolicy",
+            "microsoft.entra.serviceprincipal",
         ],
         poll_interval_seconds=10,
         timeout_seconds=900,

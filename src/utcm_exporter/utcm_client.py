@@ -1,6 +1,7 @@
 import logging
+import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
@@ -12,6 +13,9 @@ LOGGER = logging.getLogger(__name__)
 _GRAPH_BETA_BASE = "https://graph.microsoft.com/beta"
 _CREATE_SNAPSHOT_URL = (
     f"{_GRAPH_BETA_BASE}/admin/configurationManagement/configurationSnapshots/createSnapshot"
+)
+_SNAPSHOT_JOBS_URL = (
+    f"{_GRAPH_BETA_BASE}/admin/configurationManagement/configurationSnapshotJobs"
 )
 
 _TEST_RESOURCES = [
@@ -62,7 +66,7 @@ def _poll_snapshot_job(
         status = job_payload.get("status", "unknown")
         LOGGER.info("Snapshot job %s status: %s", job_id, status)
 
-        if status == "succeeded":
+        if status in {"succeeded", "partiallySuccessful"}:
             return job_payload
 
         if status in {"failed", "cancelled", "canceled"}:
@@ -149,6 +153,129 @@ def _create_snapshot_request(
     )
 
 
+def _sanitize_display_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", value).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned
+
+
+def _build_unique_display_name(base_name: str) -> str:
+    sanitized_base = _sanitize_display_name(base_name) or "GitBackup"
+    timestamp = datetime.now(UTC).strftime("%Y%m%d %H%M%S")
+    suffix = f" {timestamp}"
+
+    # UTCM validation constraints: length 8..32 and only letters/numbers/spaces.
+    max_base_len = 32 - len(suffix)
+    truncated_base = sanitized_base[:max_base_len].rstrip() if max_base_len > 0 else ""
+    candidate = f"{truncated_base}{suffix}".strip()
+
+    if len(candidate) < 8:
+        fallback = "GitBackup"
+        max_fallback_len = 32 - len(suffix)
+        candidate = f"{fallback[:max_fallback_len]}{suffix}".strip()
+
+    return candidate
+
+
+def _parse_graph_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def list_snapshot_jobs(*, max_jobs: int = 500) -> list[dict[str, Any]]:
+    access_token = get_access_token()
+    headers = _build_headers(access_token)
+
+    jobs: list[dict[str, Any]] = []
+    next_url = f"{_SNAPSHOT_JOBS_URL}?$top=50"
+
+    while next_url and len(jobs) < max_jobs:
+        response = requests.get(next_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+
+        page_items = payload.get("value", [])
+        if isinstance(page_items, list):
+            for item in page_items:
+                if isinstance(item, dict):
+                    jobs.append(item)
+                    if len(jobs) >= max_jobs:
+                        break
+
+        next_link = payload.get("@odata.nextLink")
+        next_url = str(next_link) if next_link else ""
+
+    return jobs
+
+
+def delete_snapshot_job(job_id: str) -> None:
+    access_token = get_access_token()
+    headers = _build_headers(access_token)
+    url = f"{_SNAPSHOT_JOBS_URL}/{job_id}"
+    response = requests.delete(url, headers=headers, timeout=30)
+    if response.status_code not in (200, 202, 204):
+        graph_error = _extract_graph_error_text(response)
+        raise UTCMClientError(
+            f"Failed to delete snapshot job {job_id} (HTTP {response.status_code}): {graph_error}"
+        )
+
+
+def cleanup_snapshot_jobs(
+    *,
+    older_than_days: int = 7,
+    statuses: set[str] | None = None,
+    dry_run: bool = False,
+    max_jobs: int = 500,
+) -> list[str]:
+    target_statuses = statuses or {"succeeded", "failed", "cancelled", "canceled"}
+    normalized_statuses = {status.lower() for status in target_statuses}
+    cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+
+    jobs = list_snapshot_jobs(max_jobs=max_jobs)
+    deleted_ids: list[str] = []
+
+    for job in jobs:
+        status = str(job.get("status", "")).lower()
+        if status not in normalized_statuses:
+            continue
+
+        created_at = _parse_graph_datetime(job.get("createdDateTime"))
+        if created_at is None:
+            continue
+        if created_at >= cutoff:
+            continue
+
+        job_id = _extract_job_id(job)
+        if dry_run:
+            LOGGER.info(
+                "Dry run: would delete snapshot job %s (status=%s, createdDateTime=%s)",
+                job_id,
+                status,
+                created_at.isoformat(),
+            )
+            deleted_ids.append(job_id)
+            continue
+
+        LOGGER.info(
+            "Deleting snapshot job %s (status=%s, createdDateTime=%s)",
+            job_id,
+            status,
+            created_at.isoformat(),
+        )
+        delete_snapshot_job(job_id)
+        deleted_ids.append(job_id)
+
+    return deleted_ids
+
+
 def create_snapshot_and_wait(
     *,
     display_name: str = "GitBackup",
@@ -166,13 +293,18 @@ def create_snapshot_and_wait(
     headers = _build_headers(access_token)
 
     snapshot_resources = resources or _TEST_RESOURCES
+    initial_display_name = _build_unique_display_name(display_name)
     payload = {
-        "displayName": display_name,
+        "displayName": initial_display_name,
         "description": description,
         "resources": snapshot_resources,
     }
 
-    LOGGER.info("Creating UTCM snapshot job for %d resources", len(snapshot_resources))
+    LOGGER.info(
+        "Creating UTCM snapshot job for %d resources using displayName='%s'",
+        len(snapshot_resources),
+        initial_display_name,
+    )
     create_response = _create_snapshot_request(headers=headers, payload=payload)
     if create_response.status_code == 409:
         graph_error = _extract_graph_error_text(create_response)
@@ -181,9 +313,7 @@ def create_snapshot_and_wait(
         if job_id:
             LOGGER.info("Continuing with existing active snapshot job: %s", job_id)
         else:
-            retry_display_name = (
-                f"{display_name} {datetime.now(UTC).strftime('%Y%m%d %H%M%S')}"
-            )
+            retry_display_name = _build_unique_display_name(display_name)
             retry_payload = {**payload, "displayName": retry_display_name}
             LOGGER.info(
                 "Retrying createSnapshot with unique displayName: %s",
