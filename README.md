@@ -1,54 +1,116 @@
 # UTCM Exporter
 
-This project uses AI coding tools (for example, Claude Code or similar) to generate and evolve a Python application that exports Microsoft 365 tenant configuration resources into a Git-friendly folder structure.
+UTCM Exporter is a Python toolset that snapshots Microsoft 365 tenant configuration through Microsoft Graph UTCM beta APIs and writes deterministic YAML files for Git-based historization and diff tracking.
 
-The goal is to:
-- Trigger a UTCM snapshot from Microsoft Graph beta.
-- Download the snapshot JSON once the async job succeeds.
-- Split resources into deterministic files for historization and diff tracking in Git.
+## Scope
 
-## What The Export Should Produce
+The project currently covers:
+- App-only authentication using `msal` client credentials.
+- UTCM snapshot creation and async polling.
+- Snapshot JSON download.
+- Parsing into structured YAML files in `tenant_state/`.
+- Docs-driven resource catalog generation (`resources.json`).
+- Snapshot job cleanup utilities.
 
-All exported state is written under:
+Planned later:
+- Step 4 Git automation (auto `git add`/diff/commit) is intentionally deferred.
 
-`tenant_state/{workload}/{resource_type}/{resource_display_name_or_id}.json`
+## Output Structure
 
-This supports both single-instance and multi-instance resource types:
-- Category/workload becomes a subfolder (for example `entra`, `exchange`, `teams`).
-- Resource type becomes a nested subfolder (for example `conditionalaccesspolicy`, `transportrule`).
-- Each resource instance becomes one JSON file.
+Exported state is written to:
+
+`tenant_state/{workload}/{resource_type}/{resource_display_name_or_id}.yaml`
 
 Examples:
-- `tenant_state/entra/conditionalaccesspolicy/Require_MFA_For_Admins.json`
-- `tenant_state/exchange/transportrule/Block_External_Forwarding.json`
+- `tenant_state/entra/conditionalaccesspolicy/Require_MFA_For_Admins.yaml`
+- `tenant_state/exchange/transportrule/Block_External_Forwarding.yaml`
+- `tenant_state/teams/meetingpolicy/Global.yaml`
 
-## Technical Requirements
+## Prerequisites
 
-- Authentication: `msal` client credentials flow with values from `.env`.
-- HTTP: `requests`.
-- Dependency management: `uv` (not `requirements.txt`).
-- Logging: Python `logging` (no basic `print` for progress).
-- File naming: sanitize invalid characters (`\ / : * ? " < > |`).
-- JSON formatting: `indent=2` and `sort_keys=True` for stable diffs.
-- Filename fallback: use `displayName`, then `name`, then `id`.
+- Python 3.12+
+- `uv`
+- `.env` with:
+  - `AZURE_TENANT_ID`
+  - `AZURE_CLIENT_ID`
+  - `AZURE_CLIENT_SECRET`
+- Required UTCM and workload permissions/roles assigned in tenant
 
-## Microsoft Graph UTCM Flow (Beta)
+## Install
 
-1. Start snapshot job  
-   `POST /beta/admin/configurationManagement/configurationSnapshots/createSnapshot`
-2. Poll snapshot job  
-   `GET /beta/admin/configurationManagement/configurationSnapshotJobs/{jobId}` every 10-15 seconds until `succeeded`
-3. Download snapshot result  
-   Use `resourceLocation` URL returned by the completed job
+```bash
+uv sync
+```
 
-## AI-Assisted Implementation Plan
+## Script Usage
 
-Build the project iteratively to reduce risk:
+### 1) Test Graph auth
 
-1. Authentication and basic connectivity.
-2. UTCM snapshot creation and async polling.
-3. Snapshot download and resource-to-file unpacking.
-4. Git historization automation (`git add`, diff check, timestamped commit when changed).
-5. Scale resource coverage via `resources.json`.
+```bash
+uv run scripts/test_graph_connectivity.py
+```
 
-See `PLAN.md` for the full milestone prompts and validation checks.
+Expected: logs your tenant `displayName` and `id`.
+
+### 2) Build resource catalog from official docs
+
+Generates `resources.json` with supported UTCM resource IDs from docs pages.
+
+```bash
+uv run scripts/build_resources_catalog.py --output resources.json
+```
+
+### 3) Run snapshot job
+
+Default: uses resources from `resources.json`.
+
+```bash
+uv run scripts/run_utcm_snapshot.py
+```
+
+Test mode with explicit resources:
+
+```bash
+uv run scripts/run_utcm_snapshot.py --resources \
+  microsoft.entra.conditionalaccesspolicy \
+  microsoft.teams.meetingpolicy
+```
+
+The command prints a `resourceLocation` URL when the job completes.
+
+### 4) Parse snapshot into YAML files
+
+```bash
+uv run scripts/parse_snapshot.py "<resourceLocation>" --output-dir tenant_state --debug
+```
+
+Notes:
+- Pruning stale files is enabled by default.
+- Use `--no-clean` to disable prune.
+- `--debug` writes raw snapshot JSON to `tenant_state/_debug/` (or `--debug-file <path>`).
+
+### 5) Cleanup old snapshot jobs
+
+Dry run:
+
+```bash
+uv run scripts/cleanup_snapshot_jobs.py --older-than-days 7 --dry-run
+```
+
+Delete:
+
+```bash
+uv run scripts/cleanup_snapshot_jobs.py --older-than-days 7
+```
+
+## Operational Notes
+
+- Snapshot jobs can return `partiallySuccessful`; this is treated as terminal.
+- Some resource IDs may be listed in docs but rejected by backend as unsupported at runtime.
+- The snapshot client auto-removes unsupported resource types reported by Graph and retries.
+
+## Project Docs
+
+- `PLAN.md`: implementation milestones and validation checks.
+- `AGENTS.md`: coding and architecture rules for AI-driven development.
+- `RUNBOOK.md`: concise day-2 command reference.
